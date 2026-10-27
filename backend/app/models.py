@@ -79,7 +79,7 @@ class PlannedActivity(Base):
         CheckConstraint(
             "status IN "
             "('not_started', 'in_progress', 'completed', "
-            "'on_hold', 'cancelled', 'unknown')",
+            "'blocked', 'on_hold', 'unknown')",
             name="ck_activity_status",
         ),
         CheckConstraint(
