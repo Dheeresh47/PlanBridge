@@ -27,8 +27,8 @@ ACTIVITY_STATUSES = (
     "not_started",
     "in_progress",
     "completed",
+    "blocked",
     "on_hold",
-    "cancelled",
     "unknown",
 )
 
