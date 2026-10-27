@@ -183,8 +183,20 @@ Rules:
 - Detect duplicate external IDs within a project.
 - Report invalid rows clearly; do not silently discard them.
 - Preserve source filename and row references for traceability.
+
 - Define explicit import/update behavior before implementing imports that
   modify existing activities.
+
+### Planned activity import and update policy
+
+- **No implicit overwrites:** Importing a planned activity must not silently overwrite an existing activity in the same project.
+- **Existing activity conflict:** If an uploaded row's `external_id` already exists in the target project, report the row as a conflict and leave the existing database record unchanged.
+- **Duplicate IDs within the upload:** Flag all rows involved in a duplicate `external_id` conflict. Do not silently select one row.
+- **Valid new activities:** Only validated rows whose `external_id` does not already exist in the target project are eligible for insertion.
+- **Invalid or conflicting rows:** Report the source row and a clear reason. Do not silently discard rows or partially modify existing activities.
+- **Import summary:** Report inserted, invalid, conflicting, and skipped-empty-row counts.
+- **Future updates:** Any update to existing activities requires a separately defined, explicit update workflow. It is not part of the initial import behavior.
+
 
 ### Progress report CSV/XLSX
 
