@@ -3,15 +3,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from app.import_validation import (
     REQUIRED_COLUMNS,
     OPTIONAL_COLUMNS,
 )
+from app.tabular_source import (
+    SUPPORTED_EXTENSIONS,
+    clean_cell as _clean_cell,
+    is_empty as _is_empty,
+    load_raw_table as _load_raw_table,
+    normalize_headers,
+)
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx"}
 ALLOWED_COLUMNS = REQUIRED_COLUMNS | OPTIONAL_COLUMNS
 
 
@@ -25,51 +29,6 @@ class ParsedActivityFile:
     source_format: str
     headers: list[str]
     rows: list[dict[str, Any]]
-
-
-def _is_empty(value: Any) -> bool:
-    if value is None:
-        return True
-
-    if isinstance(value, str):
-        return not value.strip()
-
-    try:
-        return bool(pd.isna(value))
-    except (TypeError, ValueError):
-        return False
-
-
-def _clean_cell(value: Any) -> Any:
-    """Convert pandas missing values to None without changing real values."""
-    return None if _is_empty(value) else value
-
-
-def _load_raw_table(
-    path: Path,
-    sheet_name: str | int,
-) -> pd.DataFrame:
-    """Read the file without treating its first row as column names."""
-    if path.suffix.lower() == ".csv":
-        return pd.read_csv(
-            path,
-            header=None,
-            dtype=object,
-            keep_default_na=False,
-            skip_blank_lines=False,
-            encoding="utf-8-sig",
-            engine="python",
-            on_bad_lines="error",
-        )
-
-    return pd.read_excel(
-        path,
-        sheet_name=sheet_name,
-        header=None,
-        dtype=object,
-        keep_default_na=False,
-        engine="openpyxl",
-    )
 
 
 def read_planned_activity_file(
@@ -127,7 +86,7 @@ def read_planned_activity_file(
             "The header row contains an empty column name."
         )
 
-    headers = [str(header).strip().lower() for header in raw_headers]
+    headers = normalize_headers(raw_headers)
 
     duplicates = sorted(
         {

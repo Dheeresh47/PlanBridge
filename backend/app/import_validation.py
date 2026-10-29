@@ -1,8 +1,11 @@
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from math import isfinite
+from datetime import date
 from typing import Any
+
+from app.value_parsing import is_empty as _is_empty
+from app.value_parsing import parse_date as _parse_date
+from app.value_parsing import parse_progress as _parse_progress
 
 
 REQUIRED_COLUMNS = {"external_id", "name"}
@@ -37,50 +40,6 @@ class ValidationResult:
     valid_rows: list[ValidatedActivity] = field(default_factory=list)
     errors: list[RowError] = field(default_factory=list)
     skipped_empty_rows: int = 0
-
-
-def _is_empty(value: Any) -> bool:
-    return value is None or (
-        isinstance(value, str) and not value.strip()
-    )
-
-
-def _parse_date(value: Any) -> date:
-    if isinstance(value, datetime):
-        return value.date()
-
-    if isinstance(value, date):
-        return value
-
-    if not isinstance(value, str):
-        raise ValueError("Expected a date in YYYY-MM-DD format.")
-
-    try:
-        return date.fromisoformat(value.strip())
-    except ValueError as exc:
-        raise ValueError(
-            "Expected a valid date in YYYY-MM-DD format."
-        ) from exc
-
-
-def _parse_progress(value: Any) -> float:
-    if isinstance(value, bool):
-        raise ValueError("Progress must be a number from 0 to 100.")
-
-    try:
-        progress = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "Progress must be a number from 0 to 100."
-        ) from exc
-
-    if not isfinite(progress):
-        raise ValueError("Progress must be a finite number from 0 to 100.")
-
-    if not 0 <= progress <= 100:
-        raise ValueError("Progress must be between 0 and 100.")
-
-    return progress
 
 
 def validate_planned_activity_rows(
