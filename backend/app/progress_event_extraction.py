@@ -21,11 +21,33 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models import ProgressEvent, ProgressReport
+from app.progress_report_import import ImportedProgressReport
 from app.progress_report_segmentation import (
     SEGMENTATION_RULE,
     segment_report_text,
 )
 from app.progress_report_validation import comparable_text
+
+
+#: Metadata key holding the observations the report supplied, in the same
+#: shape whether they were applied to the event or withheld from it.
+REPORT_OBSERVATIONS_KEY = "report_observations"
+
+#: Metadata key stating what became of those observations.
+OBSERVATIONS_STATE_KEY = "report_observations_state"
+
+#: Metadata key explaining a withholding, None otherwise.
+OBSERVATIONS_REASON_KEY = "report_observations_withheld_reason"
+
+APPLIED = "applied"
+WITHHELD = "withheld"
+NOT_SUPPLIED = "not_supplied"
+
+WITHHELD_REASON_MULTIPLE_STATEMENTS = (
+    "The report supplied reported values but yielded several statements. "
+    "Assigning them to one statement would assert something the report does "
+    "not say, so they were not applied to any event."
+)
 
 
 class ProgressEventExtractionError(ValueError):
@@ -67,8 +89,16 @@ class ReportObservations:
         }
 
 
-def observations_from_import(imported) -> ReportObservations:
-    """Build observations from an ImportedProgressReport."""
+def observations_from_import(
+    imported: ImportedProgressReport,
+) -> ReportObservations:
+    """
+    Build observations from one row of a progress-report import result.
+
+    Extraction consumes what the importer produced, so depending on that
+    module is the right direction and introduces no cycle: the importer does
+    not import this module.
+    """
     return ReportObservations(
         reported_activity_id=imported.reported_activity_id,
         reported_status=imported.reported_status,
@@ -177,17 +207,28 @@ def extract_progress_events(
                 ExtractionIssue(
                     scope="observations",
                     message=(
-                        "The report supplied reported values but yielded "
-                        f"{len(segments)} statements. Assigning them to one "
-                        "statement would assert something the report does "
-                        "not say, so every event's reported fields were "
-                        "left unknown. The values are recorded in each "
-                        "event's extraction metadata."
+                        f"{WITHHELD_REASON_MULTIPLE_STATEMENTS} The report "
+                        f"yielded {len(segments)} statements. The values are "
+                        "recorded in each event's extraction metadata."
                     ),
                 )
             )
 
+        if not observations.any_supplied:
+            observations_state = NOT_SUPPLIED
+            withheld_reason = None
+        elif attach_observations:
+            observations_state = APPLIED
+            withheld_reason = None
+        else:
+            observations_state = WITHHELD
+            withheld_reason = WITHHELD_REASON_MULTIPLE_STATEMENTS
+
         for segment in segments:
+            # The observations are recorded under one key in the same shape
+            # however they were treated, so a value left unknown because the
+            # report said nothing stays distinguishable from one withheld
+            # because it could not be assigned safely.
             metadata: dict[str, object] = {
                 "segmentation": SEGMENTATION_RULE,
                 "segment_index": segment.index,
@@ -195,16 +236,14 @@ def extract_progress_events(
                 "source_start": segment.source_start,
                 "source_end": segment.source_end,
                 "list_marker": segment.list_marker,
-                "observations_applied": attach_observations,
+                REPORT_OBSERVATIONS_KEY: (
+                    observations.as_metadata()
+                    if observations.any_supplied
+                    else None
+                ),
+                OBSERVATIONS_STATE_KEY: observations_state,
+                OBSERVATIONS_REASON_KEY: withheld_reason,
             }
-
-            if observations.any_supplied:
-                key = (
-                    "report_observations"
-                    if attach_observations
-                    else "withheld_report_observations"
-                )
-                metadata[key] = observations.as_metadata()
 
             event = ProgressEvent(
                 report_id=report_id,

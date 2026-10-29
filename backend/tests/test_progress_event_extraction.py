@@ -14,6 +14,12 @@ import pytest
 
 from app.models import PlannedActivity, ProgressEvent
 from app.progress_event_extraction import (
+    APPLIED,
+    NOT_SUPPLIED,
+    OBSERVATIONS_REASON_KEY,
+    OBSERVATIONS_STATE_KEY,
+    REPORT_OBSERVATIONS_KEY,
+    WITHHELD,
     ProgressEventExtractionError,
     ReportObservations,
     extract_progress_events,
@@ -86,7 +92,11 @@ def test_single_statement_report_yields_one_event(db_session, project):
     assert metadata["segmentation"] == "lines_and_bullets"
     assert metadata["segment_index"] == 0
     assert metadata["segment_count"] == 1
-    assert metadata["observations_applied"] is False
+
+    # The key is always present, so a consumer reads one place.
+    assert metadata[REPORT_OBSERVATIONS_KEY] is None
+    assert metadata[OBSERVATIONS_STATE_KEY] == NOT_SUPPLIED
+    assert metadata[OBSERVATIONS_REASON_KEY] is None
 
 
 @pytest.mark.integration
@@ -146,9 +156,14 @@ def test_observations_attach_only_to_a_single_statement_report(
     assert event.reported_date == date(2026, 11, 9)
 
     metadata = event.extraction_metadata
-    assert metadata["observations_applied"] is True
-    assert metadata["report_observations"]["reported_status"] == "completed"
-    assert metadata["report_observations"]["reported_date"] == "2026-11-09"
+    assert metadata[OBSERVATIONS_STATE_KEY] == APPLIED
+    assert metadata[OBSERVATIONS_REASON_KEY] is None
+
+    supplied = metadata[REPORT_OBSERVATIONS_KEY]
+    assert supplied["reported_status"] == "completed"
+    assert supplied["reported_date"] == "2026-11-09"
+    assert supplied["reported_activity_id"] == "A-110"
+    assert supplied["reported_progress"] == 100.0
 
 
 @pytest.mark.integration
@@ -182,13 +197,17 @@ def test_observations_are_withheld_from_a_multi_statement_report(
         assert event.reported_date is None
 
         metadata = event.extraction_metadata
-        assert metadata["observations_applied"] is False
+        assert metadata[OBSERVATIONS_STATE_KEY] == WITHHELD
 
-        # Not lost: recorded as withheld for a reviewer.
-        withheld = metadata["withheld_report_observations"]
-        assert withheld["reported_activity_id"] == "A-110"
-        assert withheld["reported_progress"] == 100.0
-        assert withheld["reported_date"] == "2026-11-09"
+        # Not lost: durably recorded under the same key as when applied,
+        # with an explicit reason beside it.
+        supplied = metadata[REPORT_OBSERVATIONS_KEY]
+        assert supplied["reported_activity_id"] == "A-110"
+        assert supplied["reported_progress"] == 100.0
+        assert supplied["reported_date"] == "2026-11-09"
+        assert "would assert something the report does not say" in (
+            metadata[OBSERVATIONS_REASON_KEY]
+        )
 
 
 @pytest.mark.integration
@@ -203,8 +222,10 @@ def test_no_observations_supplied_leaves_fields_unknown(
 
     event = stored_events(db_session, imported.report_id)[0]
     assert event.reported_status is None
-    assert "report_observations" not in event.extraction_metadata
-    assert "withheld_report_observations" not in event.extraction_metadata
+    assert event.extraction_metadata[REPORT_OBSERVATIONS_KEY] is None
+    assert (
+        event.extraction_metadata[OBSERVATIONS_STATE_KEY] == NOT_SUPPLIED
+    )
 
 
 @pytest.mark.integration
@@ -349,3 +370,125 @@ def test_extraction_rolls_back_and_reraises_database_errors():
         extract_progress_events(session, uuid4())
 
     session.rollback.assert_called_once()
+
+
+@pytest.mark.integration
+def test_metadata_uses_one_key_and_shape_whether_applied_or_withheld(
+    db_session, project
+):
+    """A reviewer reads the same key either way, and the state tells which."""
+    single = import_one(
+        db_session,
+        project,
+        "Roof installed",
+        reported_activity_id="A-110",
+        reported_progress="100",
+    )
+    multiple = import_one(
+        db_session,
+        project,
+        "Roof installed\nGlazing started",
+        source_filename="week-2.csv",
+        reported_activity_id="A-110",
+        reported_progress="100",
+    )
+
+    extract_progress_events(
+        db_session, single.report_id, observations_from_import(single)
+    )
+    extract_progress_events(
+        db_session, multiple.report_id, observations_from_import(multiple)
+    )
+
+    applied = stored_events(db_session, single.report_id)[0]
+    withheld = stored_events(db_session, multiple.report_id)[0]
+
+    # Same key, same shape, regardless of treatment.
+    assert (
+        applied.extraction_metadata[REPORT_OBSERVATIONS_KEY]
+        == withheld.extraction_metadata[REPORT_OBSERVATIONS_KEY]
+    )
+    assert set(
+        applied.extraction_metadata[REPORT_OBSERVATIONS_KEY]
+    ) == {
+        "reported_activity_id",
+        "reported_status",
+        "reported_progress",
+        "reported_date",
+    }
+
+    # The state and reason are what differ.
+    assert applied.extraction_metadata[OBSERVATIONS_STATE_KEY] == APPLIED
+    assert withheld.extraction_metadata[OBSERVATIONS_STATE_KEY] == WITHHELD
+    assert applied.extraction_metadata[OBSERVATIONS_REASON_KEY] is None
+    assert withheld.extraction_metadata[OBSERVATIONS_REASON_KEY]
+
+    # And the event-level values: applied on one, unknown on the other.
+    assert applied.reported_activity_id == "A-110"
+    assert withheld.reported_activity_id is None
+
+
+@pytest.mark.integration
+def test_withheld_values_are_distinguishable_from_never_supplied(
+    db_session, project
+):
+    """The distinction downstream review needs, recorded on the event."""
+    silent = import_one(db_session, project, "Site cleared\nFence erected")
+    withholding = import_one(
+        db_session,
+        project,
+        "Roof installed\nGlazing started",
+        source_filename="week-2.csv",
+        reported_progress="100",
+    )
+
+    extract_progress_events(db_session, silent.report_id)
+    extract_progress_events(
+        db_session,
+        withholding.report_id,
+        observations_from_import(withholding),
+    )
+
+    silent_event = stored_events(db_session, silent.report_id)[0]
+    withheld_event = stored_events(db_session, withholding.report_id)[0]
+
+    # Both have an unknown event-level progress.
+    assert silent_event.reported_progress is None
+    assert withheld_event.reported_progress is None
+
+    # But only one had a known report-level value that could not be assigned.
+    assert (
+        silent_event.extraction_metadata[OBSERVATIONS_STATE_KEY]
+        == NOT_SUPPLIED
+    )
+    assert (
+        withheld_event.extraction_metadata[OBSERVATIONS_STATE_KEY]
+        == WITHHELD
+    )
+    assert (
+        withheld_event.extraction_metadata[REPORT_OBSERVATIONS_KEY][
+            "reported_progress"
+        ]
+        == 100.0
+    )
+
+
+def test_observations_from_import_accepts_an_imported_progress_report():
+    from app.progress_report_import import ImportedProgressReport
+
+    imported = ImportedProgressReport(
+        report_id=uuid4(),
+        row_number=2,
+        reported_activity_id="A-110",
+        reported_status="completed",
+        reported_progress=100.0,
+        reported_date=date(2026, 11, 9),
+    )
+
+    observations = observations_from_import(imported)
+
+    assert observations.reported_activity_id == "A-110"
+    assert observations.reported_status == "completed"
+    assert observations.reported_progress == 100.0
+    assert observations.reported_date == date(2026, 11, 9)
+    assert observations.any_supplied is True
