@@ -9,11 +9,15 @@ from datetime import date
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pandas as pd
 import pytest
 
 from app.models import PlannedActivity, ProgressReport
 from app.progress_report_import import import_progress_reports
-from app.progress_report_reader import ParsedReportFile
+from app.progress_report_reader import (
+    ParsedReportFile,
+    read_progress_report_file,
+)
 from app.progress_report_validation import (
     EXISTING_REPORT_SCOPE,
     UPLOAD_SCOPE,
@@ -435,3 +439,93 @@ def test_same_upload_and_existing_matches_are_both_reported(
 
     # One row, counted once, despite carrying two flags.
     assert result.duplicate_count == 2
+
+
+@pytest.mark.integration
+def test_xlsx_file_imports_end_to_end_into_postgres(
+    db_session, project, tmp_path
+):
+    """The whole path: a real .xlsx file, read, validated and stored."""
+    path = tmp_path / "week-3.xlsx"
+
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        pd.DataFrame(
+            [["Ignore this sheet", "A-000", "done", 100, "2026-11-01"]],
+            columns=["text", "activity_id", "status", "progress", "date"],
+        ).to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame(
+            [
+                [
+                    "Roof installed",
+                    "A-110",
+                    "Completed",
+                    100,
+                    date(2026, 11, 9),
+                ],
+                ["Glazing started", "A-111", "WIP", 15, None],
+            ],
+            columns=["text", "activity_id", "status", "progress", "date"],
+        ).to_excel(writer, sheet_name="Week 3", index=False)
+
+    parsed = read_progress_report_file(path, sheet_name="Week 3")
+
+    assert parsed.source_format == "xlsx"
+    assert parsed.unmapped_fields == []
+
+    result = import_progress_reports(db_session, project.id, parsed)
+
+    assert result.inserted_count == 2
+    assert result.invalid_count == 0
+    assert result.duplicate_count == 0
+    assert result.errors == []
+
+    reports = stored_reports(db_session, project.id)
+    assert [report.original_text for report in reports] == [
+        "Roof installed",
+        "Glazing started",
+    ]
+
+    # source_format must satisfy ck_report_source_format in PostgreSQL.
+    assert {report.source_format for report in reports} == {"xlsx"}
+    assert [report.source_row for report in reports] == ["2", "3"]
+    assert {report.source_filename for report in reports} == {
+        "week-3.xlsx"
+    }
+
+    # Native Excel types survive validation; absent values stay unknown.
+    observations = {
+        report.row_number: report for report in result.reports
+    }
+    assert observations[2].reported_status == "completed"
+    assert observations[2].reported_progress == 100.0
+    assert observations[2].reported_date == date(2026, 11, 9)
+    assert observations[3].reported_status == "in_progress"
+    assert observations[3].reported_date is None
+
+
+@pytest.mark.integration
+def test_xlsx_reupload_is_flagged_against_the_stored_csv_report(
+    db_session, project, tmp_path
+):
+    """Duplicate detection is independent of the source file format."""
+    import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file([{"text": "Roof installed"}]),
+    )
+
+    path = tmp_path / "week-4.xlsx"
+    pd.DataFrame([["Roof installed"]], columns=["text"]).to_excel(
+        path, sheet_name="Week 4", index=False
+    )
+
+    parsed = read_progress_report_file(path, sheet_name="Week 4")
+    result = import_progress_reports(db_session, project.id, parsed)
+
+    assert result.inserted_count == 1
+    assert result.duplicate_count == 1
+
+    flag = result.duplicate_flags[0]
+    assert flag.scope == EXISTING_REPORT_SCOPE
+    assert flag.imported is True
+    assert flag.existing_source_filename == "week-1.csv"
