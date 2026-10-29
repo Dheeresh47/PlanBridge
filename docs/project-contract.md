@@ -226,36 +226,78 @@ import error reporting must be handled explicitly during implementation.
 
 - **Caller-supplied mapping:** The importer is given a column mapping naming
   the source column for each logical field. It does not infer meaning from
-  header names. The documented default mapping is `text`, `activity_id`,
-  `status`, `progress`, `date`.
+  header names.
 - **Required text column:** The mapping must name the report text column and
   that column must exist in the file. A missing one is a read error that
   names the available columns.
+- **Optional field states:** Each optional field is in one of three states.
+  Left at its default, the documented default column name is used if the file
+  contains it, and the field is otherwise unmapped. Set to nothing, the
+  caller declares that the file does not supply it and the field is unmapped.
+  Named explicitly, the column must exist: a name the file does not contain
+  is a read error naming the available columns. An explicitly mapped field is
+  therefore never silently imported as missing values. The documented default
+  column names are `text`, `activity_id`, `status`, `progress`, `date`.
 - **Unmapped source columns:** Columns the mapping does not name are ignored
   rather than rejected, because reports carry fields the system does not use.
-- **Absent optional columns:** An optional field with no matching column is
-  reported as unmapped. Its value is unknown for every row; it is never
-  defaulted. A mapping naming a column the file lacks is reported the same
-  way rather than failing the import, so the caller can tell the two apart.
+- **Unmapped fields:** An unmapped optional field is unknown for every row
+  and is reported in the import summary. It is never defaulted.
 - **Original text preserved:** The report text is stored exactly as read,
   without trimming or normalization. Duplicate detection compares a
-  normalized copy only.
+  normalized copy only, and that normalization is applied identically to
+  uploaded rows and to stored reports.
 - **Blank rows:** Only a wholly blank source row is skipped. A row carrying
   content elsewhere but no report text is an invalid row, reported with its
   source row number.
 - **Reported status:** Input statuses are mapped to the contract vocabulary
-  through an explicit alias table. An unrecognized status is reported rather
-  than silently recorded as unknown.
-- **Duplicate records:** Rows whose report text repeats another row's in the
-  same upload are flagged and still imported. A report may legitimately
-  restate a statement, and discarding a copy would drop evidence. Which
-  occurrence matters is a review decision, not an import one.
-- **Import summary:** Report inserted, invalid, duplicate, and
-  skipped-empty-row counts, plus the unmapped optional fields.
+  through the alias table documented in section 7. An unrecognized status is
+  reported rather than silently recorded as unknown.
 - **Scope:** Importing a report records its text and provenance only. It does
   not extract progress events, match activities, or modify planned
   activities. Validated optional observations are returned to the caller for
   the extraction step rather than persisted by the importer.
+
+### Progress report duplicate detection
+
+A report may legitimately restate a statement, so repeated text is never
+treated as proof of a redundant observation and is never silently discarded.
+Duplicates are diagnostics, reported alongside the import rather than as
+blocking validation errors.
+
+- **Same upload:** Rows whose normalized report text matches another row in
+  the same upload are all flagged, including the first. Each flag names a
+  deterministic reference occurrence, the lowest source row number in the
+  group, so the same upload always produces the same diagnostics.
+- **Rows with other errors:** Duplicate detection considers every row with
+  nonblank report text, including rows that failed validation for another
+  reason. A row with blank text has no text to compare and is not grouped.
+- **Existing reports:** Normalized text is also compared against reports
+  already stored in the same project. A match is reported as a potential
+  duplicate, not as an identical observation, and names the existing record's
+  source filename and row where available.
+- **Project isolation:** Comparison against stored reports is scoped to the
+  target project. Identical text in another project is never flagged.
+- **No uniqueness constraint:** Report text carries no database uniqueness
+  constraint. Detection is advisory and never prevents an import.
+- **Import outcome stated:** Every duplicate flag records whether the row it
+  refers to was imported, so a reviewer can tell a flagged-and-stored row
+  from a flagged row rejected for an unrelated validation error.
+
+### Progress report import summary
+
+The summary separates blocking outcomes from diagnostics.
+
+- `skipped_empty_count`: wholly blank source rows.
+- `invalid_count`: distinct rows not imported because of a blocking
+  validation error.
+- `inserted_count`: rows persisted.
+- These three partition the file: `inserted_count + invalid_count +
+  skipped_empty_count` equals the number of source rows read.
+- `duplicate_count`: distinct rows carrying a duplicate flag. This count is a
+  diagnostic and is independent of the partition above. A flagged row may
+  have been imported or rejected, so it may also be counted in
+  `inserted_count` or in `invalid_count`.
+- Unmapped optional fields are reported alongside the counts.
 
 ## 5. Matching and review contract
 
@@ -297,8 +339,26 @@ The initial status vocabulary is:
 - on_hold
 - unknown
 
-Input aliases may be mapped to this vocabulary through explicit validation
+Input aliases are mapped to this vocabulary through explicit validation
 and normalization rules.
+
+The accepted input aliases are listed below. Matching is case-insensitive;
+underscores, hyphens and slashes are treated as spaces and repeated
+whitespace is collapsed before lookup. An input that matches no alias is
+reported as an error; it is never silently recorded as `unknown`.
+Aliases are listed in normalized form, so `n a` matches the input `N/A`.
+
+| Canonical status | Accepted aliases |
+| --- | --- |
+| `not_started` | `not started`, `notstarted`, `pending`, `to do`, `todo`, `yet to start` |
+| `in_progress` | `in progress`, `inprogress`, `ongoing`, `started`, `under way`, `wip`, `work in progress` |
+| `completed` | `closed`, `complete`, `completed`, `done`, `finished` |
+| `blocked` | `blocked`, `blocker`, `impediment`, `stuck` |
+| `on_hold` | `deferred`, `on hold`, `onhold`, `paused`, `suspended` |
+| `unknown` | `n a`, `na`, `tbd`, `unknown` |
+
+A status reported for an activity remains an observation. Normalizing it
+does not approve a schedule update.
 
 Progress is a percentage from 0 to 100. An absent progress value is
 unknown; it must not be interpreted as zero. A reported status and reported
@@ -336,6 +396,18 @@ The MVP is acceptable when:
 - Unit and API tests cover validation, matching, review, transactions,
   and audit behavior.
 - Matching quality is evaluated on a held-out synthetic test set.
+
+### Test execution prerequisites
+
+- Unit tests must not require a database connection.
+- Database integration tests run against a dedicated test database. They must
+  never fall back to the development database: a configured database other
+  than the dedicated test database is an unconditional failure, in every
+  mode.
+- When integration tests are requested explicitly, an unavailable database or
+  a test database behind the latest migration must fail clearly. A run that
+  silently skips its integration tests and reports success is not acceptable.
+- Test setup never creates, drops, truncates or migrates a database.
 
 ## 10. Concurrency and idempotency
 
