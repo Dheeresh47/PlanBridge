@@ -135,3 +135,70 @@ def test_text_with_no_statements_yields_nothing():
 
 def test_segmentation_rule_is_named_for_the_metadata():
     assert SEGMENTATION_RULE == "lines_and_bullets"
+
+
+def test_lettered_markers_are_left_in_place():
+    """They are indistinguishable from an initial or a reference."""
+    segments, skipped = segment_report_text(
+        "A) Roof installed\n"
+        "a. Glazing started\n"
+        "I. Snagging open\n"
+        "b) Cladding delayed\n"
+    )
+
+    assert texts(segments) == [
+        "A) Roof installed",
+        "a. Glazing started",
+        "I. Snagging open",
+        "b) Cladding delayed",
+    ]
+    assert [segment.list_marker for segment in segments] == [None] * 4
+    assert skipped == 0
+
+
+def test_parenthesised_letters_are_left_in_place():
+    segments, _ = segment_report_text("(a) Roof installed")
+
+    assert texts(segments) == ["(a) Roof installed"]
+    assert segments[0].list_marker is None
+
+
+def test_dash_variants_other_than_hyphen_are_not_markers():
+    """Only the documented bullet forms are stripped."""
+    segments, _ = segment_report_text(
+        "– En dash kept\n— Em dash kept\n· Middot kept\n"
+    )
+
+    assert texts(segments) == [
+        "– En dash kept",
+        "— Em dash kept",
+        "· Middot kept",
+    ]
+    assert [segment.list_marker for segment in segments] == [None] * 3
+
+
+def test_a_lettered_line_with_no_content_is_kept_not_skipped():
+    segments, skipped = segment_report_text("a.\n")
+
+    assert texts(segments) == ["a."]
+    assert skipped == 0
+
+
+def test_negative_numbers_decimals_and_years_keep_their_text():
+    for line in (
+        "-5 degrees overnight",
+        "1.5 m poured",
+        "2026 budget approved",
+        "-12.5 variance reported",
+    ):
+        segments, _ = segment_report_text(line)
+
+        assert texts(segments) == [line], line
+        assert segments[0].list_marker is None, line
+
+
+def test_marker_only_lines_are_still_skipped():
+    segments, skipped = segment_report_text("-\n*\n•\n1.\n(2)\n")
+
+    assert segments == []
+    assert skipped == 5

@@ -6,7 +6,9 @@ statement ends and the next begins. The same text always yields the same
 segments in the same order, so extraction is reproducible.
 
 A leading list marker is formatting rather than evidence, so it is removed
-from the statement. Nothing else is altered, and every segment records the
+from the statement. Only the documented bullet and numeric forms count as
+markers; lettered forms are left in place because they can be legitimate
+source text. Nothing else is altered, and every segment records the
 character range it came from, so the exact source text stays recoverable.
 """
 
@@ -16,17 +18,20 @@ from dataclasses import dataclass
 
 SEGMENTATION_RULE = "lines_and_bullets"
 
-#: A bullet or an ordered-list marker at the start of a line. Kept narrow so
-#: a sentence opening with a number or a dash is not mistaken for a marker.
+#: A bullet or a numeric list marker at the start of a line. Kept narrow so a
+#: statement opening with a negative number, a decimal or a year is not
+#: mistaken for a marker.
+#:
+#: Lettered forms such as "A)", "a." and "I." are deliberately absent: they
+#: are indistinguishable from legitimate source text like an initial or a
+#: reference, and stripping them could destroy evidence.
 _LIST_MARKER = re.compile(
     r"""
     ^[ \t]*
     (?:
-        [-*•·–—]        # - * bullet middot en-dash em-dash
-      | \(\s*\d{1,3}\s*\)                  # (1)
-      | \d{1,3}\s*[.)]                     # 1. or 1)
-      | \(\s*[a-zA-Z]\s*\)                 # (a)
-      | [a-zA-Z]\s*[.)](?=[ \t]|$)         # a. or a)
+        [-*•]                         # - * bullet
+      | \(\s*\d{1,3}\s*\)                  # (3)
+      | \d{1,3}\s*[.)]                     # 1. or 2)
     )
     # Whitespace, or the end of the line for a marker with nothing after it.
     (?:[ \t]+|$)
