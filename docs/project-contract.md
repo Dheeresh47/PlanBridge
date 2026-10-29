@@ -143,6 +143,14 @@ Stored candidate ordering:
 - The top score and the margin to the next candidate are computed over the
   full scored set, never over the stored list, so pruning can neither
   conceal nor manufacture ambiguity.
+- Where exactly one eligible candidate is scored there is no next candidate,
+  so the margin equals that candidate's combined score, and the absence of a
+  competitor is stated in its explanation. The margin is not unavailable in
+  this case: a sole candidate is unambiguous by definition, rather than
+  ambiguous for want of a comparison. A sole candidate therefore cannot be
+  reported as ambiguous while the accept floor is at or above the configured
+  margin, which holds for every configuration in the development search
+  grid.
 
 Identifier evidence:
 
