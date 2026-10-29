@@ -149,7 +149,14 @@ def extract_progress_events(
     observations = observations or ReportObservations()
 
     try:
-        report = session.get(ProgressReport, report_id)
+        # Locked for the rest of this transaction so the existing-event
+        # check below cannot be overtaken. Under read-committed isolation a
+        # competing extraction's uncommitted insert is invisible, so without
+        # this both attempts would find no events and both would insert. The
+        # lock is on this one report, so other reports are unaffected.
+        report = session.get(
+            ProgressReport, report_id, with_for_update=True
+        )
 
         if report is None:
             raise ProgressEventExtractionError(
@@ -157,7 +164,9 @@ def extract_progress_events(
             )
 
         # Existing events are left untouched: match results and review
-        # decisions may already refer to them.
+        # decisions may already refer to them. A competing extraction that
+        # committed while this one waited for the lock is seen here, so it
+        # takes the ordinary conflict path.
         existing_count = (
             session.query(ProgressEvent)
             .filter(ProgressEvent.report_id == report_id)

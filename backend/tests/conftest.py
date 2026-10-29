@@ -17,18 +17,19 @@ instead of skipping. A database other than planbridge_test always fails, in
 either mode.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from dotenv import dotenv_values
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, delete, inspect, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
-from app.models import Project
+from app.models import ProgressEvent, ProgressReport, Project
 from tests.db_prerequisites import (
     FAIL,
     PASS,
@@ -200,3 +201,88 @@ def project(db_session) -> Project:
 def project_b(db_session) -> Project:
     """A second, unrelated project, for project-scoping assertions."""
     return _make_project(db_session, f"Other project {uuid4().hex[:8]}")
+
+
+@dataclass
+class ConcurrentExtractionSetup:
+    """A committed report plus two independent sessions."""
+
+    report_id: UUID
+    project_id: UUID
+    #: Sessions on separate connections, each with its own transaction.
+    first: Session
+    second: Session
+
+
+@pytest.fixture
+def concurrent_extraction(test_engine):
+    """
+    Setup for testing a check-then-insert from two connections.
+
+    The savepoint-based db_session fixture cannot be used here: a single
+    session has one transaction, and the interleaving under test needs two.
+    This fixture therefore commits its setup, which is the only way a second
+    connection can see the report, and deletes exactly the rows it created
+    afterwards. It creates, drops, truncates and migrates nothing.
+    """
+    project_id = uuid4()
+    report_id = uuid4()
+
+    setup = Session(bind=test_engine)
+
+    try:
+        setup.add(
+            Project(
+                id=project_id,
+                name=f"Concurrency probe {uuid4().hex[:8]}",
+            )
+        )
+        setup.flush()
+        setup.add(
+            ProgressReport(
+                id=report_id,
+                project_id=project_id,
+                original_text="Roof installed",
+                source_filename="concurrency.csv",
+                source_format="csv",
+            )
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    first = Session(bind=test_engine)
+    second = Session(bind=test_engine)
+
+    try:
+        yield ConcurrentExtractionSetup(
+            report_id=report_id,
+            project_id=project_id,
+            first=first,
+            second=second,
+        )
+    finally:
+        # Release any lock still held before the cleanup tries to delete.
+        for session in (first, second):
+            session.rollback()
+            session.close()
+
+        cleanup = Session(bind=test_engine)
+
+        try:
+            cleanup.execute(
+                delete(ProgressEvent).where(
+                    ProgressEvent.report_id == report_id
+                )
+            )
+            cleanup.execute(
+                delete(ProgressReport).where(
+                    ProgressReport.id == report_id
+                )
+            )
+            cleanup.execute(
+                delete(Project).where(Project.id == project_id)
+            )
+            cleanup.commit()
+        finally:
+            cleanup.close()

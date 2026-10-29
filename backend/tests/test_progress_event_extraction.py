@@ -11,8 +11,10 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 
-from app.models import PlannedActivity, ProgressEvent
+from app.models import PlannedActivity, ProgressEvent, ProgressReport
 from app.progress_event_extraction import (
     APPLIED,
     NOT_SUPPLIED,
@@ -492,3 +494,134 @@ def test_observations_from_import_accepts_an_imported_progress_report():
     assert observations.reported_progress == 100.0
     assert observations.reported_date == date(2026, 11, 9)
     assert observations.any_supplied is True
+
+
+@pytest.mark.integration
+def test_concurrent_extraction_of_one_report_is_serialized(
+    concurrent_extraction,
+):
+    """
+    The existing-event check must hold against a competing extraction.
+
+    Without the report row lock both attempts find no events under
+    read-committed isolation and both insert. Here the first attempt holds a
+    lock on the report, so the second cannot reach its check: it waits, and
+    the short lock_timeout turns that wait into a visible failure rather
+    than a test that hangs.
+
+    The holder takes FOR NO KEY UPDATE rather than FOR UPDATE deliberately.
+    FOR UPDATE would also block the child insert through the foreign key's
+    own FOR KEY SHARE check, so the test would pass whether or not
+    extraction locks anything. FOR NO KEY UPDATE permits that insert and
+    conflicts only with extraction's own FOR UPDATE, so this fails if the
+    lock is removed.
+    """
+    setup = concurrent_extraction
+
+    locked = setup.first.execute(
+        text(
+            "SELECT id FROM progress_reports WHERE id = :rid "
+            "FOR NO KEY UPDATE"
+        ),
+        {"rid": setup.report_id},
+    ).scalar()
+    assert locked is not None
+
+    setup.second.execute(text("SET LOCAL lock_timeout = '400ms'"))
+
+    with pytest.raises(OperationalError):
+        extract_progress_events(setup.second, setup.report_id)
+
+    # The blocked attempt inserted nothing.
+    setup.second.rollback()
+    assert (
+        setup.second.query(ProgressEvent)
+        .filter(ProgressEvent.report_id == setup.report_id)
+        .count()
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_extraction_of_another_report_is_not_blocked(
+    concurrent_extraction, db_session, project
+):
+    """Locking is per report, so unrelated extractions still proceed."""
+    setup = concurrent_extraction
+
+    setup.first.execute(
+        text(
+            "SELECT id FROM progress_reports WHERE id = :rid FOR UPDATE"
+        ),
+        {"rid": setup.report_id},
+    )
+
+    # A different report, on a different connection, extracts normally.
+    other = import_one(db_session, project, "Glazing started")
+    result = extract_progress_events(db_session, other.report_id)
+
+    assert result.created_count == 1
+    assert result.conflict_count == 0
+
+
+@pytest.mark.integration
+def test_the_second_attempt_refuses_once_the_first_commits(
+    concurrent_extraction,
+):
+    """
+    The refusal policy is the same sequential or concurrent.
+
+    Once the first extraction commits and releases the lock, the second
+    acquires it, sees the committed events and takes the ordinary conflict
+    path rather than inserting again.
+    """
+    setup = concurrent_extraction
+
+    first = extract_progress_events(setup.first, setup.report_id)
+    assert first.created_count == 1
+
+    second = extract_progress_events(setup.second, setup.report_id)
+
+    assert second.created_count == 0
+    assert second.conflict_count == 1
+    assert second.events == []
+    assert any(
+        "already has 1 extracted event" in issue.message
+        for issue in second.issues
+    )
+
+    # Exactly one event exists, from the first attempt.
+    events = (
+        setup.second.query(ProgressEvent)
+        .filter(ProgressEvent.report_id == setup.report_id)
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].id == first.events[0].event_id
+
+
+@pytest.mark.integration
+def test_extraction_takes_a_row_lock_on_the_report(concurrent_extraction):
+    """The lock is what closes the window, so assert it is really taken."""
+    setup = concurrent_extraction
+
+    statements: list[str] = []
+
+    @event.listens_for(setup.second.get_bind(), "before_cursor_execute")
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        extract_progress_events(setup.second, setup.report_id)
+    finally:
+        event.remove(
+            setup.second.get_bind(), "before_cursor_execute", record
+        )
+
+    locking = [
+        statement
+        for statement in statements
+        if "FOR UPDATE" in statement.upper()
+        and "progress_reports" in statement
+    ]
+    assert len(locking) == 1
