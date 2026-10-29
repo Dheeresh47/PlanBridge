@@ -10,6 +10,7 @@ colorama==0.4.6
 detect-installer==0.2.1
 dnspython==2.9.0
 email-validator==2.3.0
+et_xmlfile==2.0.0
 fastapi==0.162.0
 fastapi-cli==0.0.32
 fastapi-cloud-cli==0.26.0
@@ -28,6 +29,7 @@ Mako==1.4.3
 markdown-it-py==4.2.0
 MarkupSafe==3.0.4
 mdurl==0.1.2
+numpy==2.5.4
 opentelemetry-api==1.45.1
 opentelemetry-exporter-http-transport==0.66b1
 opentelemetry-exporter-otlp-common==0.66b1
@@ -47,6 +49,7 @@ pydantic-settings==2.16.1
 pydantic_core==2.50.1
 Pygments==2.21.0
 pytest==9.1.1
+python-dateutil==3.0.0
 python-dotenv==1.2.4
 python-multipart==0.0.32
 PyYAML==6.0.3
@@ -56,6 +59,7 @@ rich-toolkit==0.20.6
 rignore==0.8.1
 sentry-sdk==2.73.0
 shellingham==1.5.4
+six==1.17.0
 SQLAlchemy==2.1.6
 starlette==1.10.0
 truststore==0.10.5
