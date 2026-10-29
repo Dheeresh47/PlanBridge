@@ -8,7 +8,13 @@ application environment and so targets the development database.
 
 Nothing here creates, drops, truncates or migrates a database. The test
 database schema is applied manually with Alembic; these fixtures only verify
-that it is already at head and skip when it is not.
+that it is already at head.
+
+By default a missing or outdated test database skips the integration tests,
+so the unit tests stay runnable without PostgreSQL. Pass --require-db, as an
+explicitly requested integration run should, and those conditions fail
+instead of skipping. A database other than planbridge_test always fails, in
+either mode.
 """
 
 from pathlib import Path
@@ -19,11 +25,21 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from dotenv import dotenv_values
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from app.models import Project
+from tests.db_prerequisites import (
+    FAIL,
+    PASS,
+    PrerequisiteCheck,
+    check_connection,
+    check_database_url,
+    check_env_file,
+    check_revision,
+    check_schema_present,
+    resolution,
+)
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -31,8 +47,37 @@ REPO_ROOT = BACKEND_DIR.parent
 TEST_ENV_FILE = BACKEND_DIR / ".env.test"
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
-# The integration fixtures refuse to connect to any other database.
-REQUIRED_TEST_DATABASE = "planbridge_test"
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--require-db",
+        action="store_true",
+        default=False,
+        help=(
+            "Fail instead of skipping when the test database is "
+            "unavailable or behind the latest migration. Use this when "
+            "running the integration tests on purpose, so a run cannot "
+            "report success having skipped them."
+        ),
+    )
+
+
+@pytest.fixture(scope="session")
+def require_db(pytestconfig) -> bool:
+    return bool(pytestconfig.getoption("--require-db"))
+
+
+def _enforce(check: PrerequisiteCheck, require_db: bool) -> None:
+    """Apply a prerequisite check to the current run."""
+    decision = resolution(check, require_db)
+
+    if decision == PASS:
+        return
+
+    if decision == FAIL:
+        pytest.fail(check.reason, pytrace=False)
+
+    pytest.skip(check.reason)
 
 
 def _expected_head() -> str:
@@ -42,68 +87,57 @@ def _expected_head() -> str:
 
 
 @pytest.fixture(scope="session")
-def test_database_url() -> str:
+def test_database_url(require_db) -> str:
     """
     Resolve the test database URL and refuse anything but planbridge_test.
 
     This is the structural guard against an integration test reaching the
-    development database: the development URL cannot satisfy it.
+    development database: the development URL cannot satisfy it, in any mode.
     """
-    if not TEST_ENV_FILE.is_file():
-        pytest.skip(
-            f"{TEST_ENV_FILE.name} is missing; "
-            "integration tests need a configured test database."
-        )
+    _enforce(check_env_file(TEST_ENV_FILE), require_db)
 
     url_value = dotenv_values(TEST_ENV_FILE).get("DATABASE_URL")
 
-    if not url_value:
-        pytest.fail(
-            f"{TEST_ENV_FILE.name} does not define DATABASE_URL."
-        )
-
-    database = make_url(url_value).database
-
-    if database != REQUIRED_TEST_DATABASE:
-        pytest.fail(
-            "Refusing to run integration tests against database "
-            f"'{database}'. DATABASE_URL in {TEST_ENV_FILE.name} must "
-            f"target '{REQUIRED_TEST_DATABASE}'."
-        )
+    _enforce(
+        check_database_url(url_value, TEST_ENV_FILE.name),
+        require_db,
+    )
 
     return url_value
 
 
 @pytest.fixture(scope="session")
-def test_engine(test_database_url):
+def test_engine(test_database_url, require_db):
     """A dedicated engine for the test database, verified to be at head."""
     engine = create_engine(test_database_url, poolclass=NullPool)
 
+    current = None
+    schema_present = False
+    connection_error: Exception | None = None
+
     try:
         with engine.connect() as connection:
-            if not inspect(connection).has_table("alembic_version"):
-                pytest.skip(
-                    "The test database has no alembic_version table. "
-                    "Apply the migrations to it before running "
-                    "integration tests."
-                )
+            schema_present = inspect(connection).has_table(
+                "alembic_version"
+            )
 
-            current = connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar()
-    except Exception as exc:  # noqa: BLE001 — surfaced as a skip, not an error
+            if schema_present:
+                current = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar()
+    except Exception as exc:  # noqa: BLE001 — classified below, not raised
+        connection_error = exc
+
+    if connection_error is not None or not schema_present:
         engine.dispose()
-        pytest.skip(f"The test database is unavailable: {type(exc).__name__}")
+        _enforce(check_connection(connection_error), require_db)
+        _enforce(check_schema_present(schema_present), require_db)
 
-    expected = _expected_head()
+    check = check_revision(current, _expected_head())
 
-    if current != expected:
+    if not check.ok:
         engine.dispose()
-        pytest.skip(
-            f"The test database is at revision {current!r}, not head "
-            f"{expected!r}. Apply the migrations to it before running "
-            "integration tests."
-        )
+        _enforce(check, require_db)
 
     yield engine
 
