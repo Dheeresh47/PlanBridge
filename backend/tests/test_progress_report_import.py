@@ -14,6 +14,10 @@ import pytest
 from app.models import PlannedActivity, ProgressReport
 from app.progress_report_import import import_progress_reports
 from app.progress_report_reader import ParsedReportFile
+from app.progress_report_validation import (
+    EXISTING_REPORT_SCOPE,
+    UPLOAD_SCOPE,
+)
 
 
 def make_parsed_file(rows, unmapped_fields=None, source_filename="week-1.csv"):
@@ -253,3 +257,181 @@ def test_import_rolls_back_and_reraises_database_errors():
         )
 
     session.rollback.assert_called_once()
+
+
+@pytest.mark.integration
+def test_reupload_flags_a_potential_duplicate_of_an_existing_report(
+    db_session, project
+):
+    first = import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file([{"text": "Framing under way"}]),
+    )
+    assert first.duplicate_count == 0
+
+    second = import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file(
+            [{"text": "  framing   UNDER WAY  "}],
+            source_filename="week-2.csv",
+        ),
+    )
+
+    # Still imported: repeated text is never discarded.
+    assert second.inserted_count == 1
+    assert second.invalid_count == 0
+    assert second.duplicate_count == 1
+    assert len(stored_reports(db_session, project.id)) == 2
+
+    flag = second.duplicate_flags[0]
+    assert flag.scope == EXISTING_REPORT_SCOPE
+    assert flag.row_number == 2
+    assert flag.imported is True
+
+    # Reported as a possibility, not as proof.
+    assert "potential duplicate" in flag.message
+    assert "matches an existing report" in flag.message
+
+    # The existing record is identified.
+    existing = stored_reports(db_session, project.id)[0]
+    assert flag.existing_report_id == existing.id
+    assert flag.existing_source_filename == "week-1.csv"
+    assert flag.existing_source_row == "2"
+    assert "'week-1.csv' row 2" in flag.message
+
+
+@pytest.mark.integration
+def test_existing_report_matching_is_scoped_to_the_target_project(
+    db_session, project, project_b
+):
+    parsed_file = make_parsed_file([{"text": "Site cleared"}])
+
+    import_progress_reports(db_session, project.id, parsed_file)
+
+    # Identical text in a different project is not a duplicate.
+    other = import_progress_reports(db_session, project_b.id, parsed_file)
+
+    assert other.inserted_count == 1
+    assert other.duplicate_count == 0
+    assert other.duplicate_flags == []
+
+    # And re-uploading into the original project still flags.
+    again = import_progress_reports(db_session, project.id, parsed_file)
+    assert again.duplicate_count == 1
+    assert again.duplicate_flags[0].scope == EXISTING_REPORT_SCOPE
+
+
+@pytest.mark.integration
+def test_rows_in_this_upload_are_not_matched_against_themselves(
+    db_session, project
+):
+    result = import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file([{"text": "Only statement"}]),
+    )
+
+    assert result.inserted_count == 1
+    assert result.duplicate_count == 0
+
+
+@pytest.mark.integration
+def test_invalid_row_matching_an_existing_report_is_flagged_not_imported(
+    db_session, project
+):
+    import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file([{"text": "Framing under way"}]),
+    )
+
+    result = import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file(
+            [{"text": "Framing under way", "reported_progress": "999"}],
+            source_filename="week-2.csv",
+        ),
+    )
+
+    assert result.inserted_count == 0
+    assert result.invalid_count == 1
+    assert result.duplicate_count == 1
+
+    flag = result.duplicate_flags[0]
+    assert flag.scope == EXISTING_REPORT_SCOPE
+    # Flagged as repeated evidence, but rejected for an unrelated reason.
+    assert flag.imported is False
+
+    # Only the first upload's report is stored.
+    assert len(stored_reports(db_session, project.id)) == 1
+
+
+@pytest.mark.integration
+def test_duplicate_flags_do_not_disturb_the_count_partition(
+    db_session, project
+):
+    rows = [
+        {"text": "Repeated statement"},
+        {"text": "repeated statement"},
+        {"text": "Bad status", "reported_status": "nearly done"},
+        {"text": ""},
+        {},
+    ]
+
+    result = import_progress_reports(
+        db_session, project.id, make_parsed_file(rows)
+    )
+
+    # The three blocking counts partition the source rows exactly.
+    assert (
+        result.inserted_count
+        + result.invalid_count
+        + result.skipped_empty_count
+    ) == len(rows)
+    assert result.inserted_count == 2
+    assert result.invalid_count == 2
+    assert result.skipped_empty_count == 1
+
+    # Duplicates are a diagnostic over the same rows, counted separately.
+    assert result.duplicate_count == 2
+    assert result.duplicate_rows == [2, 3]
+    assert all(flag.imported for flag in result.duplicate_flags)
+
+
+@pytest.mark.integration
+def test_same_upload_and_existing_matches_are_both_reported(
+    db_session, project
+):
+    import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file([{"text": "Shared statement"}]),
+    )
+
+    result = import_progress_reports(
+        db_session,
+        project.id,
+        make_parsed_file(
+            [{"text": "Shared statement"}, {"text": "shared statement"}],
+            source_filename="week-2.csv",
+        ),
+    )
+
+    assert result.inserted_count == 2
+    assert result.duplicate_rows == [2, 3]
+
+    scopes = {
+        (flag.row_number, flag.scope) for flag in result.duplicate_flags
+    }
+    assert scopes == {
+        (2, UPLOAD_SCOPE),
+        (2, EXISTING_REPORT_SCOPE),
+        (3, UPLOAD_SCOPE),
+        (3, EXISTING_REPORT_SCOPE),
+    }
+
+    # One row, counted once, despite carrying two flags.
+    assert result.duplicate_count == 2
