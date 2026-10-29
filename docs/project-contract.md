@@ -222,6 +222,41 @@ Rules:
 CSV encoding, XLSX sheet selection, empty rows, duplicate records, and
 import error reporting must be handled explicitly during implementation.
 
+### Progress report column mapping and import policy
+
+- **Caller-supplied mapping:** The importer is given a column mapping naming
+  the source column for each logical field. It does not infer meaning from
+  header names. The documented default mapping is `text`, `activity_id`,
+  `status`, `progress`, `date`.
+- **Required text column:** The mapping must name the report text column and
+  that column must exist in the file. A missing one is a read error that
+  names the available columns.
+- **Unmapped source columns:** Columns the mapping does not name are ignored
+  rather than rejected, because reports carry fields the system does not use.
+- **Absent optional columns:** An optional field with no matching column is
+  reported as unmapped. Its value is unknown for every row; it is never
+  defaulted. A mapping naming a column the file lacks is reported the same
+  way rather than failing the import, so the caller can tell the two apart.
+- **Original text preserved:** The report text is stored exactly as read,
+  without trimming or normalization. Duplicate detection compares a
+  normalized copy only.
+- **Blank rows:** Only a wholly blank source row is skipped. A row carrying
+  content elsewhere but no report text is an invalid row, reported with its
+  source row number.
+- **Reported status:** Input statuses are mapped to the contract vocabulary
+  through an explicit alias table. An unrecognized status is reported rather
+  than silently recorded as unknown.
+- **Duplicate records:** Rows whose report text repeats another row's in the
+  same upload are flagged and still imported. A report may legitimately
+  restate a statement, and discarding a copy would drop evidence. Which
+  occurrence matters is a review decision, not an import one.
+- **Import summary:** Report inserted, invalid, duplicate, and
+  skipped-empty-row counts, plus the unmapped optional fields.
+- **Scope:** Importing a report records its text and provenance only. It does
+  not extract progress events, match activities, or modify planned
+  activities. Validated optional observations are returned to the caller for
+  the extraction step rather than persisted by the importer.
+
 ## 5. Matching and review contract
 
 1. Candidate activities must belong to the same project as the event.
