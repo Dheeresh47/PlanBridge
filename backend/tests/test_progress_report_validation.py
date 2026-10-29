@@ -1,6 +1,8 @@
 from datetime import date
 
 from app.progress_report_validation import (
+    UPLOAD_SCOPE,
+    comparable_text,
     validate_progress_report_rows,
 )
 
@@ -155,7 +157,7 @@ def test_row_with_no_text_is_an_error_not_a_skipped_row():
     ]
 
 
-def test_repeated_text_is_flagged_but_still_imported():
+def test_repeated_text_flags_every_row_against_a_reference_occurrence():
     result = validate_progress_report_rows(
         [
             {"text": "Framing under way"},
@@ -166,15 +168,81 @@ def test_repeated_text_is_flagged_but_still_imported():
 
     # Both occurrences remain available as evidence.
     assert len(result.valid_rows) == 3
-    assert result.duplicate_text_rows == [2, 4]
 
-    duplicate_errors = [
-        error
-        for error in result.errors
-        if "Report text is repeated" in error.message
+    # Duplicates are diagnostics, not blocking errors.
+    assert result.errors == []
+
+    flags = result.duplicate_flags
+    assert [flag.row_number for flag in flags] == [2, 4]
+    assert {flag.scope for flag in flags} == {UPLOAD_SCOPE}
+
+    # The lowest source row is the deterministic reference occurrence,
+    # and the first occurrence is flagged too.
+    assert {flag.reference_row for flag in flags} == {2}
+    assert "rows 2, 4" in flags[0].message
+    assert "first occurrence is row 2" in flags[0].message
+
+
+def test_duplicate_flags_are_deterministic_across_runs():
+    rows = [
+        {"text": "Same statement"},
+        {"text": "same STATEMENT"},
+        {"text": "Same  statement"},
     ]
-    assert {error.row_number for error in duplicate_errors} == {2, 4}
-    assert "rows 2, 4" in duplicate_errors[0].message
+
+    first = validate_progress_report_rows(rows)
+    second = validate_progress_report_rows(rows)
+
+    signature = lambda result: [
+        (flag.row_number, flag.scope, flag.reference_row, flag.message)
+        for flag in result.duplicate_flags
+    ]
+
+    assert signature(first) == signature(second)
+    assert [flag.row_number for flag in first.duplicate_flags] == [2, 3, 4]
+
+
+def test_duplicate_detection_includes_rows_with_other_errors():
+    """A row rejected for another reason still reveals repeated evidence."""
+    result = validate_progress_report_rows(
+        [
+            {"text": "Same text", "reported_progress": "999"},
+            {"text": "Same text"},
+        ]
+    )
+
+    # Row 2 is invalid, row 3 is valid.
+    assert [error.row_number for error in result.errors] == [2]
+    assert [row.row_number for row in result.valid_rows] == [3]
+
+    # Both are still flagged as repeating each other.
+    assert [flag.row_number for flag in result.duplicate_flags] == [2, 3]
+    assert {flag.reference_row for flag in result.duplicate_flags} == {2}
+
+
+def test_blank_text_rows_are_not_grouped_as_duplicates():
+    result = validate_progress_report_rows(
+        [{"text": ""}, {"text": "   "}]
+    )
+
+    assert result.duplicate_flags == []
+    assert [error.row_number for error in result.errors] == [2, 3]
+
+
+def test_comparable_text_is_recorded_for_every_nonblank_row():
+    result = validate_progress_report_rows(
+        [
+            {"text": "  Framing   under way "},
+            {"text": "", "reported_progress": "5"},
+            {"text": "Bad date", "reported_date": "nope"},
+        ]
+    )
+
+    # Includes the invalid row 4, excludes the blank-text row 3.
+    assert result.comparable_text_by_row == {
+        2: "framing under way",
+        4: "bad date",
+    }
 
 
 def test_errors_are_sorted_by_row_then_field():
@@ -211,3 +279,8 @@ def test_non_string_status_reports_the_permitted_vocabulary():
         assert "Unrecognized status" in error.message
         assert "not_started" in error.message
         assert "unknown" in error.message
+
+
+def test_comparable_text_normalizes_case_and_whitespace():
+    assert comparable_text("  Framing   UNDER\tway \n") == "framing under way"
+    assert comparable_text("already normal") == "already normal"

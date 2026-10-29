@@ -19,6 +19,7 @@ from app.import_validation import RowError
 from app.models import ProgressReport
 from app.progress_report_reader import ParsedReportFile
 from app.progress_report_validation import (
+    DuplicateFlag,
     validate_progress_report_rows,
 )
 
@@ -37,16 +38,31 @@ class ImportedProgressReport:
 
 @dataclass
 class ProgressReportImportResult:
-    """Summary of a progress-report import operation."""
+    """
+    Summary of a progress-report import operation.
+
+    `inserted_count`, `invalid_count` and `skipped_empty_count` partition the
+    source rows. `duplicate_count` is a diagnostic over the same rows and is
+    independent of that partition: a flagged row may have been imported or
+    rejected for an unrelated reason.
+    """
 
     inserted_count: int = 0
     invalid_count: int = 0
     duplicate_count: int = 0
     skipped_empty_count: int = 0
+    #: Blocking validation errors only.
     errors: list[RowError] = field(default_factory=list)
+    #: Duplicate diagnostics, each stating whether its row was imported.
+    duplicate_flags: list[DuplicateFlag] = field(default_factory=list)
     #: Optional logical fields the source file did not supply.
     unmapped_fields: list[str] = field(default_factory=list)
     reports: list[ImportedProgressReport] = field(default_factory=list)
+
+    @property
+    def duplicate_rows(self) -> list[int]:
+        """Distinct source rows carrying at least one duplicate flag."""
+        return sorted({flag.row_number for flag in self.duplicate_flags})
 
 
 def import_progress_reports(
@@ -58,14 +74,13 @@ def import_progress_reports(
 
     validation = validate_progress_report_rows(parsed_file.rows)
 
+    # Duplicates are diagnostics, so every row with a blocking error counts
+    # as invalid exactly once and no row is omitted from the partition.
     result = ProgressReportImportResult(
-        invalid_count=len(
-            {error.row_number for error in validation.errors}
-            - set(validation.duplicate_text_rows)
-        ),
-        duplicate_count=len(validation.duplicate_text_rows),
+        invalid_count=len({error.row_number for error in validation.errors}),
         skipped_empty_count=validation.skipped_empty_rows,
         errors=list(validation.errors),
+        duplicate_flags=list(validation.duplicate_flags),
         unmapped_fields=list(parsed_file.unmapped_fields),
     )
 
@@ -94,6 +109,15 @@ def import_progress_reports(
                 )
             )
             result.inserted_count += 1
+
+        inserted_rows = {
+            report.row_number for report in result.reports
+        }
+
+        for flag in result.duplicate_flags:
+            flag.imported = flag.row_number in inserted_rows
+
+        result.duplicate_count = len(result.duplicate_rows)
 
         if result.inserted_count > 0:
             session.commit()
