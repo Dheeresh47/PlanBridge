@@ -3,7 +3,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.config import settings
+from app.config import get_settings
 from app.database import Base
 from app import models # noqa: F401 — registers model tables with Base.metadata
 
@@ -15,7 +15,7 @@ if config.config_file_name is not None:
 # Load the database URL from application settings, not alembic.ini.
 config.set_main_option(
     "sqlalchemy.url",
-    settings.database_url.replace("%", "%%"),
+    get_settings().database_url.replace("%", "%%"),
 )
 
 # Alembic uses this metadata to detect model schema changes.

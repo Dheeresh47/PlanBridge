@@ -3,9 +3,8 @@ Shared pytest fixtures.
 
 The integration fixtures below connect to the dedicated planbridge_test
 database described by backend/.env.test. They deliberately build their own
-engine instead of reusing app.database.engine or app.database.SessionLocal,
-because those are bound at import time to whichever .env the working
-directory resolves — normally the development database.
+engine rather than using app.database.get_engine(), which resolves the
+application environment and so targets the development database.
 
 Nothing here creates, drops, truncates or migrates a database. The test
 database schema is applied manually with Alembic; these fixtures only verify
