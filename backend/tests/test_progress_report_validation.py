@@ -192,3 +192,22 @@ def test_errors_are_sorted_by_row_then_field():
         (3, "reported_progress"),
         (3, "text"),
     ]
+
+
+def test_non_string_status_reports_the_permitted_vocabulary():
+    """A spreadsheet cell may hold a number or a date, not a status word."""
+    result = validate_progress_report_rows(
+        [
+            {"text": "a", "reported_status": 42},
+            {"text": "b", "reported_status": 3.5},
+        ]
+    )
+
+    assert result.valid_rows == []
+    assert [error.row_number for error in result.errors] == [2, 3]
+
+    for error in result.errors:
+        assert error.field == "reported_status"
+        assert "Unrecognized status" in error.message
+        assert "not_started" in error.message
+        assert "unknown" in error.message

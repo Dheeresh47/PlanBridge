@@ -101,11 +101,17 @@ def normalize_status(value: Any) -> str:
     An unrecognized status is an error rather than a silent "unknown", so
     that conflicting or unexpected evidence is reported to a reviewer.
     """
-    if not isinstance(value, str):
-        raise ValueError("Expected a status value.")
+    # A spreadsheet cell may hold a number or a date. Coerce it so an
+    # unrecognized value reports the permitted vocabulary either way.
+    text = value if isinstance(value, str) else str(value)
 
     collapsed = " ".join(
-        value.strip().lower().replace("_", " ").replace("-", " ").replace("/", " ").split()
+        text.strip()
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("/", " ")
+        .split()
     )
 
     if collapsed in STATUS_ALIASES:
