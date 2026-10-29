@@ -312,6 +312,17 @@ structured events. It derives nothing that the source does not state.
   evidence. Segmentation is deterministic: the same text always yields the
   same events in the same order. A single-line report yields exactly one
   event.
+- **Recognized list markers:** Only these are removed, and only at the start
+  of a line, followed by whitespace or the end of the line:
+  - bullet markers `-`, `*` and `•`
+  - numeric list markers in the forms `1.`, `2)` and `(3)`
+
+  A marker is recognized only in those exact forms, so a statement opening
+  with a negative number, a decimal or a year keeps its text intact.
+- **Lettered markers are not stripped:** Forms such as `A)`, `a.` and `I.`
+  are left in place in v1.0. They are indistinguishable from legitimate
+  source text such as an initial or a reference, and removing them could
+  destroy evidence. Recognizing them requires a separately defined rule.
 - **Blank segments:** A line with no content after its list marker and
   surrounding whitespace is removed and counted, not stored as an event.
 - **Evidence retained:** Each event stores the statement as it appears in the
@@ -328,9 +339,17 @@ structured events. It derives nothing that the source does not state.
   report, not a particular statement within it. They are attached to the
   event only when the report yields exactly one event. When a report yields
   several events, attaching them to any one of them would assert something
-  the source does not say, so every event's reported fields stay unknown and
-  the withheld report-level observations are recorded in extraction metadata
-  and reported in the summary.
+  the source does not say, so every event's reported fields stay unknown.
+  Report-level values are never copied onto several events.
+- **Observations recorded either way:** The observations a report supplied
+  are recorded in extraction metadata under one key, in the same shape,
+  whether or not they were applied. Alongside them, metadata states
+  explicitly whether they were applied, withheld or never supplied, and why
+  anything was withheld. An event-level value that is unknown because the
+  report said nothing is therefore distinguishable from one left unknown
+  because a known report-level value could not be assigned safely. Review
+  tooling consumes that distinction; defining it here does not imply any
+  particular interface.
 - **Re-extraction:** A report that already has events is reported as a
   conflict. Its existing events are left unchanged and nothing is inserted,
   because match results and review decisions may already refer to them. Any
