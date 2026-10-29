@@ -174,3 +174,27 @@ def test_duplicate_id_row_with_validation_error_counts_as_conflict_only():
     assert result.invalid_count == 0
     assert result.inserted_count == 0
     assert session.add.call_count == 0
+
+
+def test_existing_activity_lookup_is_scoped_to_target_project():
+    session = make_session()
+    project_id = uuid4()
+
+    import_planned_activities(
+        session,
+        project_id,
+        make_parsed_file(
+            [{"external_id": "ACT-001", "name": "Design database"}]
+        ),
+    )
+
+    query = session.query.return_value
+    filter_call = query.filter.call_args
+
+    assert filter_call is not None
+
+    conditions = filter_call.args
+    assert len(conditions) == 2
+    assert conditions[0].left.name == "project_id"
+    assert conditions[0].right.value == project_id
+    assert conditions[1].left.name == "external_id"
