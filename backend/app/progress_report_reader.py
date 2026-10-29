@@ -25,26 +25,54 @@ class ProgressReportFileError(ValueError):
     """Raised when a progress-report file cannot be read safely."""
 
 
+class _Auto:
+    """Sentinel: use the documented default column if the file has it."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "AUTO"
+
+
+AUTO = _Auto()
+
+TEXT_FIELD = "text"
+
+#: Default source column for each logical field, used for AUTO.
+DEFAULT_COLUMNS = {
+    TEXT_FIELD: "text",
+    "reported_activity_id": "activity_id",
+    "reported_status": "status",
+    "reported_progress": "progress",
+    "reported_date": "date",
+}
+
+
 @dataclass(frozen=True)
 class ColumnMapping:
     """
     Source column names for each logical progress-report field.
 
-    `text` is required: it carries the original report text. The remaining
-    fields are optional observations. Setting one to None declares that the
-    file does not supply it.
+    `text` is required: it carries the original report text, and its column
+    must exist in the file.
+
+    Each optional field has three states:
+
+    - AUTO, the default: use the documented default column name if the file
+      contains it, otherwise leave the field unmapped.
+    - None: the caller declares that the file does not supply this field.
+    - An explicit column name: the caller asserts the column exists, so a
+      name the file does not contain is an error rather than a field that
+      silently reads as missing for every row.
     """
 
-    text: str = "text"
-    reported_activity_id: str | None = "activity_id"
-    reported_status: str | None = "status"
-    reported_progress: str | None = "progress"
-    reported_date: str | None = "date"
+    text: str = DEFAULT_COLUMNS[TEXT_FIELD]
+    reported_activity_id: str | None | _Auto = AUTO
+    reported_status: str | None | _Auto = AUTO
+    reported_progress: str | None | _Auto = AUTO
+    reported_date: str | None | _Auto = AUTO
 
 
 DEFAULT_COLUMN_MAPPING = ColumnMapping()
 
-TEXT_FIELD = "text"
 OPTIONAL_FIELDS = tuple(
     field.name for field in fields(ColumnMapping) if field.name != TEXT_FIELD
 )
@@ -153,19 +181,37 @@ def read_progress_report_file(
     for field_name in OPTIONAL_FIELDS:
         requested = getattr(mapping, field_name)
 
+        if isinstance(requested, _Auto):
+            # A default name the file happens to lack simply leaves the
+            # field unmapped; the caller asserted nothing about it.
+            column = DEFAULT_COLUMNS[field_name]
+
+            if column in header_positions:
+                mapped_columns[field_name] = column
+            else:
+                unmapped_fields.append(field_name)
+
+            continue
+
         if is_empty(requested):
+            # The caller declared that this file does not supply the field.
             unmapped_fields.append(field_name)
             continue
 
+        # An explicitly named column must exist, so that an explicitly
+        # mapped field is never read as missing for every row.
         column = str(requested).strip().lower()
 
-        if column in header_positions:
-            mapped_columns[field_name] = column
-        else:
-            # Reported as unmapped rather than raising, so a report that
-            # simply lacks an optional column still imports. The caller can
-            # surface this to distinguish it from a mapping mistake.
-            unmapped_fields.append(field_name)
+        if column not in header_positions:
+            raise ProgressReportFileError(
+                f"The mapped column '{requested}' for '{field_name}' is not "
+                "present in the file. Available columns are: "
+                + ", ".join(headers)
+                + ". Map the field to an existing column, or to nothing if "
+                "this file does not supply it."
+            )
+
+        mapped_columns[field_name] = column
 
     field_positions = {
         field_name: header_positions[column]

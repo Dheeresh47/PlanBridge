@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from app.progress_report_reader import (
+    AUTO,
     ColumnMapping,
     ProgressReportFileError,
     read_progress_report_file,
@@ -210,3 +211,68 @@ def test_utf8_bom_and_non_ascii_text_are_read(tmp_path):
     assert parsed.rows[0]["text"] == (
         "Drainage work completed — 2 m³ removed"
     )
+
+
+def test_default_mapping_uses_default_columns_when_present(tmp_path):
+    path = tmp_path / "reports.csv"
+    write_csv(path, "text,status\nSite cleared,done\n")
+
+    parsed = read_progress_report_file(path)
+
+    assert parsed.mapped_columns == {
+        "text": "text",
+        "reported_status": "status",
+    }
+    assert sorted(parsed.unmapped_fields) == [
+        "reported_activity_id",
+        "reported_date",
+        "reported_progress",
+    ]
+
+
+def test_explicit_mapping_naming_a_missing_column_is_rejected(tmp_path):
+    path = tmp_path / "reports.csv"
+    write_csv(path, "text,status\nSite cleared,done\n")
+
+    with pytest.raises(ProgressReportFileError) as error:
+        read_progress_report_file(
+            path, mapping=ColumnMapping(reported_progress="progres_typo")
+        )
+
+    message = str(error.value)
+    assert "progres_typo" in message
+    assert "reported_progress" in message
+    assert "text, status" in message
+
+
+def test_field_mapped_to_nothing_is_unmapped_without_error(tmp_path):
+    path = tmp_path / "reports.csv"
+    write_csv(path, "text,status\nSite cleared,done\n")
+
+    parsed = read_progress_report_file(
+        path, mapping=ColumnMapping(reported_status=None)
+    )
+
+    assert "reported_status" not in parsed.mapped_columns
+    assert "reported_status" in parsed.unmapped_fields
+    assert parsed.rows[0] == {"text": "Site cleared"}
+
+
+def test_auto_is_the_default_for_optional_fields():
+    mapping = ColumnMapping()
+
+    assert mapping.reported_status is AUTO
+    assert mapping.reported_progress is AUTO
+    assert mapping.text == "text"
+
+
+def test_explicitly_mapped_column_is_used_over_the_default(tmp_path):
+    path = tmp_path / "reports.csv"
+    write_csv(path, "text,status,official_status\na,draft,done\n")
+
+    parsed = read_progress_report_file(
+        path, mapping=ColumnMapping(reported_status="official_status")
+    )
+
+    assert parsed.mapped_columns["reported_status"] == "official_status"
+    assert parsed.rows[0]["reported_status"] == "done"
