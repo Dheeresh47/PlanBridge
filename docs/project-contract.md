@@ -354,6 +354,14 @@ structured events. It derives nothing that the source does not state.
   conflict. Its existing events are left unchanged and nothing is inserted,
   because match results and review decisions may already refer to them. Any
   deliberate re-extraction requires a separately defined workflow.
+- **Concurrent extraction:** The existing-event check must hold against
+  competing extractions of the same report, not only against already
+  committed state. Extraction therefore takes a row lock on the report
+  before checking, so two concurrent attempts cannot both find no events and
+  both insert. The second attempt waits, then observes the committed events
+  and reports the ordinary conflict, so the refusal policy is the same
+  whether the attempts are sequential or concurrent. Locking is per report
+  and must not serialize extraction of other reports.
 - **Missing report:** Extracting an unknown report is an error, not an empty
   result.
 - **Extraction summary:** Report created-event, skipped-blank-segment and
@@ -489,3 +497,10 @@ The MVP is acceptable when:
   or an audit record claiming that an unsuccessful update was committed.
 - Tests must cover duplicate approvals, conflicting approvals, transaction
   rollback, and preservation of unchanged schedule fields.
+- The same rule applies wherever a check decides whether to write: a read
+  followed by a conditional insert must be serialized by the database, not
+  by assumption. Under the default read-committed isolation an uncommitted
+  insert is invisible to a competing transaction, so an unlocked
+  check-then-insert admits duplicates. Tests covering such a check must
+  exercise it from more than one connection, since a single session cannot
+  reproduce the interleaving.
