@@ -299,6 +299,50 @@ The summary separates blocking outcomes from diagnostics.
   `inserted_count` or in `invalid_count`.
 - Unmapped optional fields are reported alongside the counts.
 
+### Progress event extraction policy
+
+Extraction turns a stored report's preserved text into one or more
+structured events. It derives nothing that the source does not state.
+
+- **Scope:** Extraction reads a stored report and writes progress events. It
+  does not match activities, rank candidates, approve anything, or modify
+  planned activities. The report's `original_text` is never rewritten.
+- **Segmentation:** The report text is split on line boundaries, and a
+  leading list marker on a line is treated as formatting rather than
+  evidence. Segmentation is deterministic: the same text always yields the
+  same events in the same order. A single-line report yields exactly one
+  event.
+- **Blank segments:** A line with no content after its list marker and
+  surrounding whitespace is removed and counted, not stored as an event.
+- **Evidence retained:** Each event stores the statement as it appears in the
+  source, and its extraction metadata records the segment index and the
+  character range it came from, so the exact original text is always
+  recoverable from the report.
+- **Normalized text:** Normalized matching text is stored separately from the
+  retained statement and never replaces it.
+- **No derived values in v1.0:** Reported activity identifiers, statuses,
+  progress percentages and dates come only from the explicit columns
+  validated at import. Extraction does not parse them out of prose. A field
+  with no explicit value remains unknown.
+- **Unambiguous attachment only:** Explicit column observations describe the
+  report, not a particular statement within it. They are attached to the
+  event only when the report yields exactly one event. When a report yields
+  several events, attaching them to any one of them would assert something
+  the source does not say, so every event's reported fields stay unknown and
+  the withheld report-level observations are recorded in extraction metadata
+  and reported in the summary.
+- **Re-extraction:** A report that already has events is reported as a
+  conflict. Its existing events are left unchanged and nothing is inserted,
+  because match results and review decisions may already refer to them. Any
+  deliberate re-extraction requires a separately defined workflow.
+- **Missing report:** Extracting an unknown report is an error, not an empty
+  result.
+- **Extraction summary:** Report created-event, skipped-blank-segment and
+  conflict counts, whether report-level observations were withheld, and the
+  reason for anything not extracted.
+- **Observations remain observations:** An extracted event is not an approved
+  schedule update, however explicit its reported values.
+
 ## 5. Matching and review contract
 
 1. Candidate activities must belong to the same project as the event.
