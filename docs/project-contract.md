@@ -636,6 +636,61 @@ Dataset adequacy and leakage:
   is never reported as a pass, and the held-out set is not regenerated and
   rerun to obtain a better number.
 
+### Synthetic generator parameters
+
+Generator parameters are fixed before any run. The experiment is made
+deterministic, measurable and reproducible before its results are seen; it
+is never adjusted to obtain a better result.
+
+- **Vocabulary partition:** the phrase vocabulary and the templates built
+  from it are partitioned deterministically into two disjoint parts.
+  Development draws from partition A under seed `20261101`. Held-out draws
+  from partition B under seed `20261102`. The partition applies at the
+  vocabulary and template level rather than to generated rows, so no
+  generation path can produce a name shared between the splits.
+- **Independent generation:** each split is generated from its own seed
+  alone. Held-out generation never reads the development set, so a held-out
+  dataset does not depend on development output.
+- **Overlap validation:** generation asserts that the normalized activity
+  names of the two splits have an empty intersection, and that no project
+  appears in both.
+- **Identifier distribution:** each event's reported identifier is drawn
+  deterministically from its own split's generator, in these fixed
+  proportions:
+  - positive events: 25 per cent name their true activity; 10 per cent name
+    a different activity that exists in the same project; 65 per cent name
+    nothing.
+  - negative events: 15 per cent name an identifier that no activity holds;
+    85 per cent name nothing.
+- **Counts are reported, never assumed:** the evaluation output reports the
+  actual integer counts and every denominator. At the minimum dataset sizes
+  the proportions above do not divide into whole numbers of events, so the
+  realized counts are the figures of record.
+- **Identifier evidence stays evidence:** a correct identifier supports a
+  candidate but never accepts it. An incorrect but existing identifier is
+  conflict evidence but never rejects a candidate. A non-existent
+  identifier is not-found evidence, and is not proof that the event is
+  negative. The matching and routing policies are unchanged by this
+  distribution.
+- **Textless stress cases:** 2 per cent of negative events are generated
+  with no usable text, and the dataset metadata records them as synthetic
+  stress cases rather than as realistic reports. They count toward the
+  negative denominator and toward overall escalation, and are reported
+  separately as a diagnostic subgroup. At the minimum dataset sizes this is
+  a handful of events: enough to exercise the insufficient-text path, not
+  enough to measure it. Unit tests remain the exhaustive verification of
+  textless routing.
+- **Evidence cache identity:** cached component scores are keyed by event
+  identifier and activity identifier. No cache may rely on incidental
+  dictionary, set or frame ordering to associate a cached score with its
+  candidate.
+- **One assembly path:** evaluation ranks, prunes and routes through the
+  same code as production matching. It may precompute and cache component
+  scores, because those do not depend on the configuration, but it must not
+  carry its own ranking, rounding, tie-break, margin or routing logic.
+  Equivalence with the production matcher is asserted over complete
+  results, not over scores alone.
+
 ## 6. Approval and transaction contract
 
 - Importing a report does not approve its extracted events.
