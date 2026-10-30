@@ -9,6 +9,8 @@ pruning, and identifier evidence.
 import dataclasses
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.matching import (
     IDENTIFIER_ABSENT,
     IDENTIFIER_AGREES,
@@ -16,6 +18,7 @@ from app.matching import (
     IDENTIFIER_MATCHED_WITHOUT_TEXT,
     IDENTIFIER_NOT_FOUND,
     CandidateActivity,
+    assemble_result,
     candidate_document,
     matching_text,
     score_candidates,
@@ -514,3 +517,334 @@ def test_uuid_inputs_are_accepted_as_given():
     result = score_candidates("install roof membrane", [only])
 
     assert result.scored[0].activity.activity_id == identifier
+
+
+# ----------------------------------------- shared assembly path (step 1)
+
+
+def evidence_for(event_text, candidates, reported=None):
+    """
+    Recompute component scores the way a cache would hold them.
+
+    Mirrors what evaluation will do: normalize once, sort once, compute the
+    two component scores, then hand them to the shared assembly path.
+    """
+    from app.matching import (
+        _fuzzy_score,
+        _normalized_identifier,
+        _tfidf_scores,
+        candidate_document,
+    )
+
+    event = matching_text(event_text)
+    ordered = sorted(
+        candidates,
+        key=lambda a: (a.external_id, str(a.activity_id)),
+    )
+    reported_normalized = _normalized_identifier(reported)
+    named = next(
+        (
+            a
+            for a in ordered
+            if _normalized_identifier(a.external_id) == reported_normalized
+        ),
+        None,
+    )
+
+    if not event:
+        return event, ordered, [], [], named, bool(reported_normalized)
+
+    documents = [candidate_document(a) for a in ordered]
+    tfidf = _tfidf_scores(event, documents)
+    fuzzy = [_fuzzy_score(event, d) for d in documents]
+
+    return event, ordered, fuzzy, tfidf, named, bool(reported_normalized)
+
+
+#: Eight bays, so the scored set exceeds the stored-candidate limit.
+MANY_BAYS = [
+    activity(f"M-{index:03d}", f"install roof membrane bay {index}")
+    for index in range(8)
+]
+
+#: Two activities with the same name, so the tie-break is exercised.
+DELIBERATE_TIE = [
+    activity("T-002", "paint handrail", activity_id=UUID(int=22)),
+    activity("T-001", "paint handrail", activity_id=UUID(int=11)),
+]
+
+EQUIVALENCE_CASES = [
+    ("install roof membrane", SCHEDULE, None),
+    ("install roof membrane", SCHEDULE, "A-110"),
+    ("install roof membrane", SCHEDULE, "A-101"),
+    ("install roof membrane", SCHEDULE, "Z-999"),
+    ("membrane roof instaled", SCHEDULE, None),
+    ("catering invoice approved", SCHEDULE, None),
+    ("install install install", SCHEDULE, None),
+    ("install roof membrane", [ROOF], None),
+    ("install roof membrane", [], None),
+    ("install roof membrane", [], "A-110"),
+    ("   ", SCHEDULE, None),
+    ("   ", SCHEDULE, "A-120"),
+    ("!!!", SCHEDULE, "Z-999"),
+    ("", [], None),
+    # More candidates than the stored limit, so the limit is exercised.
+    ("install roof membrane bay 3", MANY_BAYS, None),
+    ("install roof membrane bay 3", MANY_BAYS, "M-007"),
+    # A genuine tie, resolved only by external_id then activity_id.
+    ("paint handrail", DELIBERATE_TIE, None),
+]
+
+
+def test_assemble_result_reproduces_score_candidates():
+    """The cached path must produce the identical complete result."""
+    for text, candidates, reported in EQUIVALENCE_CASES:
+        direct = score_candidates(text, candidates, reported)
+        event, ordered, fuzzy, tfidf, named, supplied = evidence_for(
+            text, candidates, reported
+        )
+        assembled = assemble_result(
+            event,
+            ordered,
+            fuzzy,
+            tfidf,
+            named_activity=named,
+            identifier_supplied=supplied,
+            config=current_matcher_config(),
+        )
+
+        assert assembled == direct, (text, candidates, reported)
+
+
+def test_equivalence_holds_across_every_grid_configuration():
+    """
+    All 420 cells, so no weighting or floor diverges between the paths.
+
+    Equality is over the complete ScoringResult, not the scores alone.
+    """
+    checked = 0
+
+    for fuzzy_weight in (0.30, 0.40, 0.50, 0.60, 0.70):
+        for accept in (0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70):
+            for margin in (0.05, 0.10, 0.15, 0.20):
+                for floor in (0.10, 0.15, 0.20):
+                    config = dataclasses.replace(
+                        current_matcher_config(),
+                        version="test-grid",
+                        fuzzy_weight=fuzzy_weight,
+                        tfidf_weight=round(1 - fuzzy_weight, 2),
+                        accept_floor=accept,
+                        margin=margin,
+                        candidate_floor=floor,
+                    )
+
+                    for text, candidates, reported in EQUIVALENCE_CASES:
+                        direct = score_candidates(
+                            text, candidates, reported, config
+                        )
+                        (
+                            event,
+                            ordered,
+                            fuzzy,
+                            tfidf,
+                            named,
+                            supplied,
+                        ) = evidence_for(text, candidates, reported)
+                        assembled = assemble_result(
+                            event,
+                            ordered,
+                            fuzzy,
+                            tfidf,
+                            named_activity=named,
+                            identifier_supplied=supplied,
+                            config=config,
+                        )
+
+                        assert assembled == direct
+                        checked += 1
+
+    assert checked == 420 * len(EQUIVALENCE_CASES)
+
+
+def test_assemble_result_reuses_evidence_across_configurations():
+    """
+    One evidence computation serves every weighting.
+
+    This is the property the evaluator depends on: component scores do not
+    depend on the configuration, only the combined score does.
+    """
+    event, ordered, fuzzy, tfidf, named, supplied = evidence_for(
+        "install roof membrane", SCHEDULE
+    )
+
+    results = []
+
+    for fuzzy_weight in (0.30, 0.50, 0.70):
+        config = dataclasses.replace(
+            current_matcher_config(),
+            version="test-weight",
+            fuzzy_weight=fuzzy_weight,
+            tfidf_weight=round(1 - fuzzy_weight, 2),
+        )
+        results.append(
+            assemble_result(
+                event,
+                ordered,
+                fuzzy,
+                tfidf,
+                named_activity=named,
+                identifier_supplied=supplied,
+                config=config,
+            )
+        )
+
+    # Component scores identical, combined scores differ with the weighting.
+    for result in results:
+        assert {
+            c.activity.external_id: (c.fuzzy_score, c.tfidf_score)
+            for c in result.scored
+        } == {
+            c.activity.external_id: (c.fuzzy_score, c.tfidf_score)
+            for c in results[0].scored
+        }
+
+    def combined_for(result, external_id):
+        return next(
+            c.combined_score
+            for c in result.scored
+            if c.activity.external_id == external_id
+        )
+
+    # A-120 scores differently on the two components, so the weighting
+    # moves its combined score. An exact match would not: fuzzy and TF-IDF
+    # would both be 1.0 and every weighting would agree.
+    partial = next(c for c in results[0].scored if c.activity is GLAZING)
+    assert partial.fuzzy_score != partial.tfidf_score
+
+    assert len({combined_for(r, "A-120") for r in results}) == 3
+
+
+def test_assemble_result_rejects_misaligned_component_scores():
+    """Guards the positional contract between scores and activities."""
+    event, ordered, fuzzy, tfidf, named, supplied = evidence_for(
+        "install roof membrane", SCHEDULE
+    )
+
+    with pytest.raises(ValueError, match="positionally aligned"):
+        assemble_result(
+            event,
+            ordered,
+            fuzzy[:-1],
+            tfidf,
+            named_activity=named,
+            identifier_supplied=supplied,
+            config=current_matcher_config(),
+        )
+
+    with pytest.raises(ValueError, match="positionally aligned"):
+        assemble_result(
+            event,
+            ordered,
+            fuzzy,
+            tfidf[:-1],
+            named_activity=named,
+            identifier_supplied=supplied,
+            config=current_matcher_config(),
+        )
+
+
+def test_assemble_result_defaults_to_the_current_configuration():
+    event, ordered, fuzzy, tfidf, named, supplied = evidence_for(
+        "install roof membrane", SCHEDULE
+    )
+
+    assert assemble_result(
+        event,
+        ordered,
+        fuzzy,
+        tfidf,
+        named_activity=named,
+        identifier_supplied=supplied,
+    ) == score_candidates("install roof membrane", SCHEDULE)
+
+
+def test_assemble_result_rejects_unsorted_activities():
+    """
+    Equal lengths cannot prove correspondence, so the order is checked.
+
+    A cache that pairs scores with the wrong activity usually does so by
+    passing the activities unsorted.
+    """
+    event, ordered, fuzzy, tfidf, named, supplied = evidence_for(
+        "install roof membrane", SCHEDULE
+    )
+
+    for mangled in (
+        list(reversed(ordered)),
+        [ordered[1], ordered[0], ordered[2]],
+    ):
+        with pytest.raises(ValueError, match="must be sorted"):
+            assemble_result(
+                event,
+                mangled,
+                fuzzy,
+                tfidf,
+                named_activity=named,
+                identifier_supplied=supplied,
+                config=current_matcher_config(),
+            )
+
+
+def test_equivalence_cases_cover_the_required_scenarios():
+    """Guards the coverage this equivalence suite is relied on for."""
+    config = current_matcher_config()
+    seen = {
+        "multiple": False,
+        "tie": False,
+        "sole": False,
+        "none": False,
+        "textless_named": False,
+        "textless_unnamed": False,
+        "agrees": False,
+        "conflict": False,
+        "not_found": False,
+        "pruned": False,
+        "named_retained": False,
+        "over_limit": False,
+    }
+
+    for text, candidates, reported in EQUIVALENCE_CASES:
+        result = score_candidates(text, candidates, reported, config)
+        scores = [c.combined_score for c in result.scored]
+
+        if len(candidates) > 1:
+            seen["multiple"] = True
+        if len(candidates) == 1:
+            seen["sole"] = True
+        if not candidates:
+            seen["none"] = True
+        if scores and len(scores) != len(set(scores)):
+            seen["tie"] = True
+        if not result.text_usable:
+            key = "textless_named" if reported else "textless_unnamed"
+            seen[key] = True
+        if result.identifier_state == IDENTIFIER_AGREES:
+            seen["agrees"] = True
+        if result.identifier_state == IDENTIFIER_CONFLICT:
+            seen["conflict"] = True
+        if result.identifier_state == IDENTIFIER_NOT_FOUND:
+            seen["not_found"] = True
+        if len(result.stored) < len(result.scored):
+            seen["pruned"] = True
+        if len(result.scored) > config.stored_candidates:
+            seen["over_limit"] = True
+
+        named = [c for c in result.stored if c.identifier_match]
+        if named and named[0].scored_position is not None:
+            below = named[0].combined_score < config.candidate_floor
+            outside = named[0].scored_position > config.stored_candidates
+            if below or outside:
+                seen["named_retained"] = True
+
+    missing = [name for name, found in seen.items() if not found]
+    assert missing == [], f"equivalence cases miss: {missing}"

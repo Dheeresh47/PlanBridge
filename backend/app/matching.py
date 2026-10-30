@@ -153,6 +153,11 @@ def _normalized_identifier(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
+def _input_order_key(activity: CandidateActivity):
+    """The order activities must arrive in, so cached scores line up."""
+    return (activity.external_id, str(activity.activity_id))
+
+
 def _sort_key(candidate: ScoredCandidate):
     """The configured total order, as a sort key."""
     return (
@@ -183,10 +188,7 @@ def score_candidates(
 
     # Sorted before anything is computed so the TF-IDF vocabulary order and
     # every tie-break are independent of the order candidates arrived in.
-    ordered_input = sorted(
-        candidates,
-        key=lambda activity: (activity.external_id, str(activity.activity_id)),
-    )
+    ordered_input = sorted(candidates, key=_input_order_key)
 
     named_activity = next(
         (
@@ -197,6 +199,56 @@ def score_candidates(
         None,
     )
     identifier_supplied = bool(reported)
+    identifier_found = named_activity is not None
+
+    if not event:
+        fuzzy_values: list[float] = []
+        tfidf_values: list[float] = []
+    else:
+        documents = [
+            candidate_document(activity) for activity in ordered_input
+        ]
+        tfidf_values = _tfidf_scores(event, documents)
+        fuzzy_values = [
+            _fuzzy_score(event, document) for document in documents
+        ]
+
+    return assemble_result(
+        event,
+        ordered_input,
+        fuzzy_values,
+        tfidf_values,
+        named_activity=named_activity,
+        identifier_supplied=identifier_supplied,
+        config=config,
+    )
+
+
+def assemble_result(
+    event: str,
+    activities: list[CandidateActivity],
+    fuzzy_values: list[float],
+    tfidf_values: list[float],
+    named_activity: CandidateActivity | None,
+    identifier_supplied: bool,
+    config: MatcherConfig | None = None,
+) -> ScoringResult:
+    """
+    Build a scoring result from already-computed component scores.
+
+    This is the single assembly path: ranking, rounding of the combined
+    score, tie-breaking, the full-set top score and margin, candidate-floor
+    pruning, identifier retention and the textless and no-candidate cases
+    all live here. Evaluation reuses it with cached component scores so that
+    no second implementation can drift from this one.
+
+    `event` is already normalized, `activities` already sorted by
+    `(external_id, activity_id)`, and `fuzzy_values` and `tfidf_values` are
+    positionally aligned with `activities`. An empty `event` means no usable
+    text, and the component lists are then ignored.
+    """
+    config = config or current_matcher_config()
+
     identifier_found = named_activity is not None
 
     if not event:
@@ -234,18 +286,32 @@ def score_candidates(
             identifier_state=state,
             text_usable=False,
             matching_text=event,
-            eligible_count=len(ordered_input),
+            eligible_count=len(activities),
         )
 
-    documents = [candidate_document(activity) for activity in ordered_input]
-    tfidf_values = _tfidf_scores(event, documents)
+    if len(fuzzy_values) != len(activities) or len(tfidf_values) != len(
+        activities
+    ):
+        raise ValueError(
+            "Component scores must be positionally aligned with the "
+            "activities they describe."
+        )
+
+    # Equal lengths cannot prove correspondence, so the required input
+    # order is checked too. A cache that pairs scores with the wrong
+    # activity usually does so by passing them unsorted.
+    if list(activities) != sorted(activities, key=_input_order_key):
+        raise ValueError(
+            "Activities must be sorted by external_id then activity_id "
+            "before assembly, so that cached component scores correspond "
+            "to the activities they were computed for."
+        )
 
     unordered: list[ScoredCandidate] = []
 
-    for activity, document, tfidf in zip(
-        ordered_input, documents, tfidf_values
+    for activity, fuzzy, tfidf in zip(
+        activities, fuzzy_values, tfidf_values
     ):
-        fuzzy = _fuzzy_score(event, document)
         combined = _round(
             config.fuzzy_weight * fuzzy + config.tfidf_weight * tfidf
         )
@@ -288,7 +354,7 @@ def score_candidates(
             ),
             text_usable=True,
             matching_text=event,
-            eligible_count=len(ordered_input),
+            eligible_count=len(activities),
         )
 
     top_score = scored[0].combined_score
@@ -336,5 +402,5 @@ def score_candidates(
         identifier_state=state,
         text_usable=True,
         matching_text=event,
-        eligible_count=len(ordered_input),
+        eligible_count=len(activities),
     )
