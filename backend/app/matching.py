@@ -169,6 +169,34 @@ def _sort_key(candidate: ScoredCandidate):
     )
 
 
+def resolve_named_activity(
+    activities: list[CandidateActivity],
+    reported_activity_id: str | None,
+) -> tuple[CandidateActivity | None, bool]:
+    """
+    Find the activity a reported identifier names, if any.
+
+    Returns the activity and whether an identifier was supplied at all;
+    those are different facts, because an identifier can be supplied and
+    name nothing. Comparison ignores case and surrounding whitespace.
+
+    Shared with evaluation, so the two paths cannot disagree about which
+    activity a report named.
+    """
+    reported = _normalized_identifier(reported_activity_id)
+
+    named = next(
+        (
+            activity
+            for activity in activities
+            if _normalized_identifier(activity.external_id) == reported
+        ),
+        None,
+    )
+
+    return named, bool(reported)
+
+
 def score_candidates(
     event_text: str | None,
     candidates: list[CandidateActivity],
@@ -184,22 +212,14 @@ def score_candidates(
     config = config or current_matcher_config()
 
     event = matching_text(event_text)
-    reported = _normalized_identifier(reported_activity_id)
 
     # Sorted before anything is computed so the TF-IDF vocabulary order and
     # every tie-break are independent of the order candidates arrived in.
     ordered_input = sorted(candidates, key=_input_order_key)
 
-    named_activity = next(
-        (
-            activity
-            for activity in ordered_input
-            if _normalized_identifier(activity.external_id) == reported
-        ),
-        None,
+    named_activity, identifier_supplied = resolve_named_activity(
+        ordered_input, reported_activity_id
     )
-    identifier_supplied = bool(reported)
-    identifier_found = named_activity is not None
 
     if not event:
         fuzzy_values: list[float] = []
