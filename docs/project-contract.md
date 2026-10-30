@@ -511,6 +511,12 @@ Reasons recorded alongside the primary outcome:
 - `identifier_agrees`: the reported identifier names the leading candidate.
   Informational only: it never promotes a candidate, relaxes a threshold or
   changes the primary outcome.
+- `identifier_matched_without_text`: the reported identifier names an
+  eligible activity, but the event has no usable text, so there is no
+  ranking for the identifier to agree or conflict with. It is recorded
+  alongside the `insufficient_text` outcome and the identifier-only
+  candidate row, so that this case stays distinguishable from a textless
+  event that named nothing. Informational only, like the two reasons above.
 - Every applicable condition above is recorded as a reason, including one
   whose outcome was outranked. An `identifier_conflict` or
   `identifier_not_found` reason therefore remains visible when

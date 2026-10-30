@@ -79,6 +79,10 @@ class ScoringResult:
     text_usable: bool
     #: The normalized text the scores were computed from.
     matching_text: str
+    #: Eligible activities offered for scoring. Routing needs this to tell a
+    #: textless event in an empty project from one in a populated project:
+    #: both leave `scored` empty, and only the former is `no_candidates`.
+    eligible_count: int
 
 
 def matching_text(text: str | None) -> str:
@@ -230,6 +234,7 @@ def score_candidates(
             identifier_state=state,
             text_usable=False,
             matching_text=event,
+            eligible_count=len(ordered_input),
         )
 
     documents = [candidate_document(activity) for activity in ordered_input]
@@ -283,6 +288,7 @@ def score_candidates(
             ),
             text_usable=True,
             matching_text=event,
+            eligible_count=len(ordered_input),
         )
 
     top_score = scored[0].combined_score
@@ -330,4 +336,5 @@ def score_candidates(
         identifier_state=state,
         text_usable=True,
         matching_text=event,
+        eligible_count=len(ordered_input),
     )
